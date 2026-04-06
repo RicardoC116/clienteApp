@@ -18,6 +18,7 @@ import { COLORS } from '../constants/Theme';
 import api from '../services/api';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { registerForPushNotificationsAsync } from '../services/notifications';
 
 // Función para normalizar texto: quita acentos, pasa a minúsculas y limpia espacios
 const normalizeString = (str: string): string => {
@@ -93,6 +94,7 @@ const LoginScreen = ({ navigation }: { navigation: any }) => {
         'contractNumber',
         deudorEncontrado.contract_number,
       );
+      await registerForPushNotificationsAsync();
 
       navigation.replace('Main');
     } catch (error: any) {

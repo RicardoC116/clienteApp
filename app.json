@@ -21,10 +21,20 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "googleServicesFile": "./google-services.json",
+      "package": "com.ricardo116.clienteApp",
+      "versionCode": 1
     },
+    
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "5925d4b3-73ae-403e-b1a6-f495b219934d"
+      }
+    },
+    "owner": "ricardo116"
   }
 }

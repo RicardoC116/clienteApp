@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "527082068642",
+    "project_id": "clienteapp-push",
+    "storage_bucket": "clienteapp-push.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:527082068642:android:74f6d9bdc51cf0444bd5fb",
+        "android_client_info": {
+          "package_name": "com.ricardo116.clienteApp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCdfJPOazs34edTneGEh6002_DUIXXztfE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
