@@ -11,22 +11,25 @@ import {
   ScrollView,
   RefreshControl,
   Modal,
+  Linking,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { COLORS } from '../constants/Theme';
 import api from '../services/api';
 import { Deudor } from '../types';
 import Card from '../components/Card';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as OfflineCache from '../services/offlineCache';
 
 const InfoScreen = ({ navigation }: { navigation: any }) => {
   const [deudor, setDeudor] = useState<Deudor | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showRefreshModal, setShowRefreshModal] = useState(false);
-
-  // Formato de dinero: $1,234.56
+  const [isOffline, setIsOffline] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string>('');
+  const [showWhatsAppHelpModal, setShowWhatsAppHelpModal] = useState(false);
+  // Formato de dinero
   const formatCurrency = (value: string | number): string => {
     const num = parseFloat(String(value || 0));
     return num.toLocaleString('es-MX', {
@@ -36,45 +39,118 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
     });
   };
 
-  // Función para cargar/actualizar datos
-  const fetchDeudor = async () => {
-    try {
-      const debtorId = await AsyncStorage.getItem('debtorId');
-      if (!debtorId) throw new Error('No se encontró ID del deudor');
+  // Función para cargar datos (con opción de forzar refresh)
 
-      const response = await api.get(`/deudores/${debtorId}`);
-      setDeudor(response.data);
+  const loadData = async (forceRefresh = false) => {
+    setLoading(true);
+    const online = await OfflineCache.isOnline();
+
+    try {
+      if (online && (forceRefresh || (await OfflineCache.isWiFi()))) {
+        // Actualizar solo en WiFi o cuando se fuerza refresh
+        const debtorId = await AsyncStorage.getItem('debtorId');
+        if (!debtorId) throw new Error('No se encontró ID del deudor');
+
+        const response = await api.get(`/deudores/${debtorId}`);
+        const data: Deudor = response.data;
+
+        setDeudor(data);
+        setLastUpdated(new Date().toISOString());
+        setIsOffline(false);
+
+        // Guardar en caché (solo deudor)
+        await OfflineCache.saveToCache(data, []);
+      } else {
+        // Modo offline o datos móviles → usar caché
+        const cached = await OfflineCache.loadFromCache();
+        if (cached?.deudor) {
+          setDeudor(cached.deudor);
+          setLastUpdated(cached.lastUpdated);
+        }
+        setIsOffline(!online);
+      }
     } catch (error: any) {
       console.error('Error al cargar datos del cliente:', error);
-      Alert.alert(
-        'Error',
-        'No se pudieron cargar los datos. Verifica tu conexión o número de contrato.',
-      );
+      const cached = await OfflineCache.loadFromCache();
+      if (cached?.deudor) {
+        setDeudor(cached.deudor);
+        setLastUpdated(cached.lastUpdated);
+        setIsOffline(true);
+      } else {
+        Alert.alert('Sin conexión', 'No hay datos guardados disponibles.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Función para abrir WhatsApp - Versión más simple y estable
+  const openWhatsApp = async () => {
+    const phone = '5212381765393'; // ← Cambia solo este número por el real
+
+    // Opción 1: Abrir chat directamente (la más estable)
+    const url = `https://wa.me/${phone}`;
+
+    console.log('Intentando abrir WhatsApp:', url);
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      console.log('¿URL soportada?', supported);
+
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        // Opción 2: Fallback abriendo en navegador
+        Alert.alert(
+          'WhatsApp',
+          'Se abrirá WhatsApp en tu navegador. ¿Deseas continuar?',
+          [
+            { text: 'Cancelar', style: 'cancel' },
+            {
+              text: 'Abrir',
+              onPress: () => Linking.openURL(url),
+            },
+          ],
+        );
+      }
+    } catch (error) {
+      console.error('Error al abrir WhatsApp:', error);
+      Alert.alert('Error', 'No se pudo abrir WhatsApp.');
+    }
+  };
+
+  // Mostrar modal de ayuda la primera vez
+  const handleWhatsAppPress = async () => {
+    // Verificamos si ya vio la ayuda
+    const hasSeenWhatsAppHelp = await AsyncStorage.getItem(
+      'hasSeenWhatsAppHelp',
+    );
+
+    if (!hasSeenWhatsAppHelp) {
+      setShowWhatsAppHelpModal(true);
+      await AsyncStorage.setItem('hasSeenWhatsAppHelp', 'true');
+    } else {
+      // Si ya lo vio, abre WhatsApp directamente
+      openWhatsApp();
     }
   };
 
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      await fetchDeudor();
-      setLoading(false);
-
-      // Chequeo del modal SOLO después de cargar datos
+    const init = async () => {
+      await loadData();
+      // Modal informativo solo la primera vez
       const hasSeen = await AsyncStorage.getItem('hasSeenInfoRefreshModal');
-      console.log('¿Ha visto el modal de refresh?', hasSeen);
       if (!hasSeen) {
         setShowRefreshModal(true);
         await AsyncStorage.setItem('hasSeenInfoRefreshModal', 'true');
       }
     };
-
-    loadData();
+    init();
   }, []);
 
-  // Pull-to-refresh
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchDeudor();
+    await loadData(true); // forceRefresh = true
     setRefreshing(false);
   }, []);
 
@@ -99,7 +175,7 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
   if (!deudor) {
     return (
       <SafeAreaView style={styles.container}>
-        <Text>No se encontraron datos del cliente.</Text>
+        <Text style={styles.emptyText}>No hay datos disponibles.</Text>
       </SafeAreaView>
     );
   }
@@ -110,8 +186,21 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Banner Offline */}
+      {isOffline && (
+        <View style={styles.offlineBanner}>
+          <Ionicons name="cloud-offline-outline" size={20} color="#fff" />
+          <Text style={styles.offlineText}>
+            Sin conexión • Datos del{' '}
+            {new Date(lastUpdated).toLocaleDateString('es-MX')}
+          </Text>
+        </View>
+      )}
+
       <ScrollView
-        contentContainerStyle={{ flexGrow: 1 }}
+        contentContainerStyle={{
+          flexGrow: 1,
+        }}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -123,7 +212,7 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
           />
         }
       >
-        {/* Header con NOMBRE DEL CLIENTE */}
+        {/* Header con nombre del cliente */}
         <View style={styles.header}>
           <TouchableOpacity onPress={handleLogout} style={styles.logoutButton}>
             <Ionicons name="log-out-outline" size={32} color="#fff" />
@@ -135,7 +224,15 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
           >
             {deudor.name || 'Información'}
           </Text>
-          <View style={{ width: 32 }} />
+
+          {/* Botón para abrir WhatsApp */}
+          <TouchableOpacity
+            style={styles.whatsappButton}
+            onPress={handleWhatsAppPress}
+          >
+            <Ionicons name="logo-whatsapp" size={24} color="#fff" />
+          </TouchableOpacity>
+          {/* <View style={{ width: 32 }} /> */}
         </View>
 
         <View style={styles.content}>
@@ -302,7 +399,6 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
             >
               <Ionicons name="close-circle" size={32} color="#EF4444" />
             </TouchableOpacity>
-
             <Ionicons
               name="refresh-circle"
               size={60}
@@ -314,7 +410,6 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
               Desliza hacia abajo en cualquier momento para actualizar la
               información. Útil si ves que algo no se refleja correctamente.
             </Text>
-
             <TouchableOpacity
               style={styles.modalButton}
               onPress={() => setShowRefreshModal(false)}
@@ -324,14 +419,79 @@ const InfoScreen = ({ navigation }: { navigation: any }) => {
           </View>
         </View>
       </Modal>
+
+      {/* Modal de ayuda de WhatsApp - solo primera vez */}
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={showWhatsAppHelpModal}
+        onRequestClose={() => setShowWhatsAppHelpModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <TouchableOpacity
+              style={styles.closeButton}
+              onPress={() => setShowWhatsAppHelpModal(false)}
+            >
+              <Ionicons name="close-circle" size={32} color="#EF4444" />
+            </TouchableOpacity>
+
+            <Ionicons
+              name="logo-whatsapp"
+              size={60}
+              color="#25D366"
+              style={{ marginBottom: 16 }}
+            />
+
+            <Text style={styles.modalTitle}>Contacto por WhatsApp</Text>
+            <Text style={styles.modalText}>
+              Presionando este botón podrás hablar directamente con la agencia
+              para cualquier duda sobre tu préstamo.
+            </Text>
+
+            <TouchableOpacity
+              style={styles.modalButton}
+              onPress={() => {
+                setShowWhatsAppHelpModal(false);
+                openWhatsApp(); // Abre WhatsApp después de cerrar el modal
+              }}
+            >
+              <Text style={styles.modalButtonText}>Abrir WhatsApp</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
+  container: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+  },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   loadingText: { marginTop: 12, fontSize: 16, color: '#64748B' },
+  emptyText: {
+    textAlign: 'center',
+    fontSize: 16,
+    color: '#64748B',
+    marginTop: 40,
+  },
+
+  offlineBanner: {
+    backgroundColor: '#F59E0B',
+    padding: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  offlineText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
 
   header: {
     backgroundColor: '#10B981',
@@ -349,6 +509,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   logoutButton: { padding: 4 },
+  whatsappButton: { padding: 4 },
 
   content: { padding: 16 },
 
@@ -381,7 +542,7 @@ const styles = StyleSheet.create({
   loanContainer: { flexDirection: 'row', justifyContent: 'space-between' },
   column: { flex: 1, gap: 8 },
 
-  // Modal de refresh
+  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',

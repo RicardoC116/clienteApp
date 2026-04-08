@@ -40,6 +40,5 @@ yarn-error.*
 /ios
 /android
 
-# Json
-*.json
+# Json files with sensitive data
 clienteapp-push.json

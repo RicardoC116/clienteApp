@@ -14,11 +14,11 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { COLORS } from '../constants/Theme';
 import api from '../services/api';
 import { Deudor, Cobro } from '../types';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as OfflineCache from '../services/offlineCache';
 
 type CobroConDatos = (
   | Cobro
@@ -39,6 +39,8 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showRefreshModal, setShowRefreshModal] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string>('');
 
   const formatCurrency = (value: string | number): string => {
     const num = parseFloat(String(value || 0));
@@ -49,83 +51,109 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
     });
   };
 
-  const fetchData = async () => {
+  const loadData = async (forceRefresh = false) => {
+    setLoading(true);
+    const online = await OfflineCache.isOnline();
+
     try {
-      const debtorId = await AsyncStorage.getItem('debtorId');
-      if (!debtorId) throw new Error('No ID');
+      if (online && (forceRefresh || (await OfflineCache.isWiFi()))) {
+        // Actualizar solo en WiFi o cuando se fuerza refresh
+        const debtorId = await AsyncStorage.getItem('debtorId');
+        if (!debtorId) throw new Error('No debtorId');
 
-      // Traer deudor
-      const deudorRes = await api.get(`/deudores/${debtorId}`);
-      const deudorData: Deudor = deudorRes.data;
-      setDeudor(deudorData);
+        // Cargar deudor
+        const deudorRes = await api.get(`/deudores/${debtorId}`);
+        const deudorData: Deudor = deudorRes.data;
 
-      // Traer cobros
-      const cobrosRes = await api.get(`/cobros/deudor/${debtorId}`);
-      const cobrosData: Cobro[] = cobrosRes.data || [];
+        // Cargar cobros
+        const cobrosRes = await api.get(`/cobros/deudor/${debtorId}`);
+        const cobrosData: Cobro[] = cobrosRes.data || [];
 
-      // Pago ficticio para first_payment
-      const firstPaymentEntry = {
-        id: 'first-payment-ficticio',
-        amount: deudorData.first_payment || '0',
-        payment_date: deudorData.createdAt,
-        isFirstPayment: true,
-      };
-
-      // Combinar y ordenar ASC
-      const allPagos = [firstPaymentEntry, ...cobrosData];
-      allPagos.sort(
-        (a, b) =>
-          new Date(a.payment_date).getTime() -
-          new Date(b.payment_date).getTime(),
-      );
-
-      // Calcular balances y numerar
-      let balanceInicial =
-        parseFloat(deudorData.total_to_pay || '0') -
-        parseFloat(deudorData.first_payment || '0');
-
-      const pagosConDatos = allPagos.map((pago, index) => {
-        if (index === 0 && pago.isFirstPayment) {
-          const balanceDespues = balanceInicial.toFixed(2);
-          return { ...pago, numeroPago: 1, balanceDespues };
-        }
-        balanceInicial -= parseFloat(pago.amount || '0');
-        return {
-          ...pago,
-          numeroPago: index + 1,
-          balanceDespues: balanceInicial.toFixed(2),
+        // Procesar pagos (primer pago + cobros)
+        const firstPaymentEntry = {
+          id: 'first-payment-ficticio',
+          amount: deudorData.first_payment || '0',
+          payment_date: deudorData.createdAt,
+          isFirstPayment: true,
         };
-      });
 
-      // Mostrar reciente arriba
-      setCobros([...pagosConDatos].reverse());
+        const allPagos = [firstPaymentEntry, ...cobrosData];
+        allPagos.sort(
+          (a, b) =>
+            new Date(a.payment_date).getTime() -
+            new Date(b.payment_date).getTime(),
+        );
+
+        let balanceInicial =
+          parseFloat(deudorData.total_to_pay || '0') -
+          parseFloat(deudorData.first_payment || '0');
+
+        const pagosConDatos = allPagos.map((pago, index) => {
+          if (index === 0 && pago.isFirstPayment) {
+            return {
+              ...pago,
+              numeroPago: 1,
+              balanceDespues: balanceInicial.toFixed(2),
+            };
+          }
+          balanceInicial -= parseFloat(pago.amount || '0');
+          return {
+            ...pago,
+            numeroPago: index + 1,
+            balanceDespues: balanceInicial.toFixed(2),
+          };
+        });
+
+        const processedCobros = [...pagosConDatos].reverse();
+
+        setDeudor(deudorData);
+        setCobros(processedCobros);
+        setLastUpdated(new Date().toISOString());
+        setIsOffline(false);
+
+        // Guardar en caché
+        await OfflineCache.saveToCache(deudorData, processedCobros);
+      } else {
+        // Modo offline o datos móviles → usar caché
+        const cached = await OfflineCache.loadFromCache();
+        if (cached?.deudor) {
+          setDeudor(cached.deudor);
+          setCobros(cached.cobros || []);
+          setLastUpdated(cached.lastUpdated);
+        }
+        setIsOffline(!online);
+      }
     } catch (error: any) {
-      console.error('Error al cargar pagos:', error);
-      Alert.alert('Error', 'No se pudieron cargar los pagos.');
+      console.error('Error cargando pagos:', error);
+      const cached = await OfflineCache.loadFromCache();
+      if (cached?.deudor) {
+        setDeudor(cached.deudor);
+        setCobros(cached.cobros || []);
+        setLastUpdated(cached.lastUpdated);
+        setIsOffline(true);
+      } else {
+        Alert.alert('Sin conexión', 'No hay datos guardados disponibles.');
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      await fetchData();
-      setLoading(false);
-
-      // Modal solo la primera vez
+    const init = async () => {
+      await loadData();
       const hasSeen = await AsyncStorage.getItem('hasSeenPaymentsRefreshModal');
-      console.log('¿Ha visto el modal de refresh de pagos?', hasSeen);
       if (!hasSeen) {
         setShowRefreshModal(true);
         await AsyncStorage.setItem('hasSeenPaymentsRefreshModal', 'true');
       }
     };
-
-    loadData();
+    init();
   }, []);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchData();
+    await loadData(true); // forceRefresh = true
     setRefreshing(false);
   }, []);
 
@@ -166,6 +194,17 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Banner Offline */}
+      {isOffline && (
+        <View style={styles.offlineBanner}>
+          <Ionicons name="cloud-offline-outline" size={20} color="#fff" />
+          <Text style={styles.offlineText}>
+            Sin conexión • Datos del{' '}
+            {new Date(lastUpdated).toLocaleDateString('es-MX')}
+          </Text>
+        </View>
+      )}
+
       <ScrollView
         contentContainerStyle={{ flexGrow: 1 }}
         refreshControl={
@@ -179,15 +218,10 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
           />
         }
       >
-        {/* Header con ícono */}
+        {/* Header */}
         <View style={styles.header}>
-          <View style={styles.logoutButton}>
-            <Ionicons
-              name="wallet-outline"
-              size={28}
-              color="#fff"
-              style={{ marginRight: 12 }}
-            />
+          <View style={styles.iconContainer}>
+            <Ionicons name="wallet-outline" size={28} color="#fff" />
           </View>
           <Text style={styles.headerTitle}>Historial de Pagos</Text>
           <View style={{ width: 32 }} />
@@ -202,7 +236,7 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
             </Text>
           </View>
 
-          {/* Tabla */}
+          {/* Tabla de Pagos */}
           <View style={styles.tableHeader}>
             <Text style={styles.headerCell}>Fecha</Text>
             <Text style={styles.headerCell}>#Pago</Text>
@@ -239,7 +273,6 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
             >
               <Ionicons name="close-circle" size={32} color="#EF4444" />
             </TouchableOpacity>
-
             <Ionicons
               name="refresh-circle"
               size={60}
@@ -251,7 +284,6 @@ const PaymentsScreen = ({ navigation }: { navigation: any }) => {
               Desliza hacia abajo para actualizar los pagos. Útil si un pago
               reciente no aparece aún.
             </Text>
-
             <TouchableOpacity
               style={styles.modalButton}
               onPress={() => setShowRefreshModal(false)}
@@ -270,6 +302,20 @@ const styles = StyleSheet.create({
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   loadingText: { marginTop: 12, fontSize: 16, color: '#64748B' },
 
+  offlineBanner: {
+    backgroundColor: '#F59E0B',
+    padding: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  offlineText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+
   header: {
     backgroundColor: '#10B981',
     paddingVertical: 7,
@@ -277,6 +323,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  iconContainer: {
+    padding: 6,
   },
   headerTitle: {
     fontSize: 22,
@@ -286,10 +335,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  logoutButton: { padding: 4 },
-
   content: { padding: 16 },
-
   summaryCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -323,7 +369,7 @@ const styles = StyleSheet.create({
 
   paymentRow: {
     flexDirection: 'row',
-    paddingVertical: 14,
+    paddingVertical: 10,
     paddingHorizontal: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#E2E8F0',
@@ -345,7 +391,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     color: '#1E2937',
   },
-
   emptyText: {
     textAlign: 'center',
     fontSize: 16,
@@ -353,7 +398,7 @@ const styles = StyleSheet.create({
     marginTop: 40,
   },
 
-  // Modal de refresh
+  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
